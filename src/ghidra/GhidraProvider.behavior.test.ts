@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { fixtureDosLoadImage } from "./GhidraLoadImage.fixture.js";
 import { fixtureRawBinaryLoadImage } from "./GhidraRawBinaryLoadImage.fixture.js";
 import {
@@ -30,6 +30,8 @@ import { err, ok } from "../domain/result.js";
 import type { Result } from "../domain/result.js";
 import { GhidraSessionError } from "./GhidraSessionError.js";
 import { silentLogger } from "../logger.js";
+import * as WindowsNativeLoader from "../windows/WindowsNativeLoader.js";
+import { WINDOWS_NATIVE_AUTHORITY_UNAVAILABLE_REASON } from "../process/WindowsAuthority.js";
 import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import { ProviderStartupDeadline } from "../process/ProviderDeadline.js";
@@ -190,6 +192,35 @@ describe("Ghidra provider", () => {
 });
 
 describe("Ghidra raw-binary profile", () => {
+  it("admits raw 6502 on Windows and binds its 16-bit language without mutation authority", async () => {
+    const ghidra = provider({ ...installationHost(), platform: "win32" });
+    const target: BinaryTarget = {
+      path: "/tmp/6502.bin",
+      sha256: "a".repeat(64),
+      kind: "executable",
+      format: "raw-binary",
+      architecture: "6502",
+      availableArchitectures: ["6502"],
+      entryPoint: "0x8001",
+      entryPointSource: "0x008001",
+    };
+    expect(ghidra.inspectTargetSupport(target).status).toBe("supported");
+    const resolved = await ghidra.resolveAnalysisProfile(target);
+    if (!resolved.ok) throw resolved.error;
+    expect(resolved.value.profile?.parameters).toMatchObject({
+      architecture: "6502",
+      loader: "BinaryLoader",
+      language_id: "6502:LE:16:default",
+      compiler_spec_id: "default",
+      entry_point: "0x8001",
+      language_selection: "caller-supplied-v1",
+    });
+    expect(
+      ghidra
+        .capabilities()
+        .some(({ available, effects }) => available && effects.mutatesArtifact),
+    ).toBe(false);
+  });
   it("commits BinaryLoader language and caller-supplied entry", async () => {
     const ghidra = provider();
     const target: BinaryTarget = {
@@ -324,6 +355,13 @@ describe("Ghidra platform support", () => {
   });
 
   it("keeps Windows P0 unavailable until native isolation authority exists", () => {
+    const native = vi
+      .spyOn(WindowsNativeLoader, "systemWindowsNativeAuthority")
+      .mockReturnValue({
+        available: false,
+        reason: WINDOWS_NATIVE_AUTHORITY_UNAVAILABLE_REASON,
+      });
+    onTestFinished(() => native.mockRestore());
     const ghidra = provider({ ...installationHost(), platform: "win32" });
     const nativeApplication = peTarget("x86_64");
 
